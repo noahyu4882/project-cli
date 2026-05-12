@@ -277,17 +277,19 @@ async function deploy(config: DeployConfig, version: string): Promise<void> {
     }
 
     // 11. 执行部署后命令（在 deployPath 根部执行，与 package.json 等文件同级）
-    // 依次 source 常见 profile 文件，确保 nvm/fnm 等注入的 PATH 生效，node/npm 等命令可用
+    // 注意：不能用 bash -i，在无 PTY 的 SSH exec 中会挂起等待 TTY
+    // 通过设置 PS1 绕过 .bashrc 开头的 [ -z "$PS1" ] && return 守卫，使 nvm/fnm 的 PATH 正常注入
     if (config.afterDeploy) {
       for (const cmd of config.afterDeploy) {
         spinner.start(`执行部署后命令: ${cmd}`)
-        const wrappedCmd = [
+        const inner = [
+          'export PS1="x"',
           '[ -f /etc/profile ] && . /etc/profile 2>/dev/null || true',
           '[ -f ~/.bash_profile ] && . ~/.bash_profile 2>/dev/null || true',
           '[ -f ~/.bashrc ] && . ~/.bashrc 2>/dev/null || true',
           cmd,
         ].join('; ')
-        const result = await ssh.execCommand(`bash -c ${JSON.stringify(wrappedCmd)}`, {
+        const result = await ssh.execCommand(`bash -l -c ${JSON.stringify(inner)}`, {
           cwd: config.server.deployPath,
         })
         if (result.stdout) {
