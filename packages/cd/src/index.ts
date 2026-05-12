@@ -208,9 +208,15 @@ async function deploy(config: DeployConfig, version: string): Promise<void> {
 
     spinner.start('正在准备部署目录...')
     // 确保部署路径存在
-    await ssh.execCommand(`mkdir -p ${config.server.deployPath}`)
+    const mkDeployResult = await ssh.execCommand(`mkdir -p ${config.server.deployPath}`)
+    if (mkDeployResult.code !== 0) {
+      throw new Error(`创建部署目录失败: ${mkDeployResult.stderr}`)
+    }
     // 创建版本目录
-    await ssh.execCommand(`mkdir -p ${versionPath}`)
+    const mkVersionResult = await ssh.execCommand(`mkdir -p ${versionPath}`)
+    if (mkVersionResult.code !== 0) {
+      throw new Error(`创建版本目录失败: ${mkVersionResult.stderr}`)
+    }
     spinner.succeed('部署目录准备完成')
 
     // 8. 上传文件
@@ -221,10 +227,15 @@ async function deploy(config: DeployConfig, version: string): Promise<void> {
 
     // 9. 在版本目录中解压
     spinner.start('正在解压文件...')
-    await ssh.execCommand(`cd ${versionPath} && unzip -o build.zip && rm build.zip`)
+    const unzipResult = await ssh.execCommand(
+      `cd ${versionPath} && unzip -o build.zip && rm build.zip`,
+    )
+    if (unzipResult.code !== 0) {
+      throw new Error(`解压文件失败: ${unzipResult.stderr || unzipResult.stdout}`)
+    }
 
     // 将构建目录内容移动到版本目录根部
-    await ssh.execCommand(`
+    const mvResult = await ssh.execCommand(`
       cd ${versionPath} && 
       if [ -d "${buildDirName}" ]; then 
         mv ${buildDirName}/* . 2>/dev/null || true
@@ -232,6 +243,9 @@ async function deploy(config: DeployConfig, version: string): Promise<void> {
         rmdir ${buildDirName} 2>/dev/null || true
       fi
     `)
+    if (mvResult.code !== 0) {
+      throw new Error(`移动构建目录内容失败: ${mvResult.stderr}`)
+    }
     spinner.succeed('文件解压完成')
 
     // 10. 将解压后版本目录内的额外文件复制到 deployPath 根部（与软链接同级）
@@ -246,19 +260,40 @@ async function deploy(config: DeployConfig, version: string): Promise<void> {
           spinner.start('正在部署额外文件...')
           continue
         }
-        await ssh.execCommand(`mkdir -p ${join(config.server.deployPath, file, '..')}`)
-        await ssh.execCommand(`cp -f ${remoteVersionFilePath} ${remoteRootFilePath}`)
+        const mkdirResult = await ssh.execCommand(
+          `mkdir -p ${join(config.server.deployPath, file, '..')}`,
+        )
+        if (mkdirResult.code !== 0) {
+          throw new Error(`创建目录失败: ${mkdirResult.stderr}`)
+        }
+        const cpResult = await ssh.execCommand(
+          `cp -f ${remoteVersionFilePath} ${remoteRootFilePath}`,
+        )
+        if (cpResult.code !== 0) {
+          throw new Error(`复制额外文件失败 (${file}): ${cpResult.stderr}`)
+        }
       }
       spinner.succeed(`额外文件部署完成 (${config.files.length} 个)`)
     }
 
     // 11. 执行部署后命令（在 deployPath 根部执行，与 package.json 等文件同级）
     if (config.afterDeploy) {
-      spinner.start('执行部署后命令...')
       for (const cmd of config.afterDeploy) {
-        await ssh.execCommand(cmd, { cwd: config.server.deployPath })
+        spinner.start(`执行部署后命令: ${cmd}`)
+        const result = await ssh.execCommand(cmd, { cwd: config.server.deployPath })
+        if (result.stdout) {
+          spinner.stop()
+          console.log(result.stdout)
+        }
+        if (result.stderr) {
+          spinner.stop()
+          console.error(chalk.yellow(result.stderr))
+        }
+        if (result.code !== 0) {
+          throw new Error(`部署后命令执行失败 (exit ${result.code}): ${cmd}`)
+        }
+        spinner.succeed(`命令执行完成: ${cmd}`)
       }
-      spinner.succeed('部署后命令执行完成')
     }
 
     // 12. 原子性切换软链接
@@ -397,7 +432,10 @@ async function cleanOldVersions(
     if (versionDirs.length > keepCount) {
       const dirsToDelete = versionDirs.slice(0, -keepCount)
       for (const dir of dirsToDelete) {
-        await ssh.execCommand(`rm -rf "${dir}"`)
+        const rmResult = await ssh.execCommand(`rm -rf "${dir}"`)
+        if (rmResult.code !== 0) {
+          console.warn(chalk.yellow(`⚠️ 删除旧版本失败 (${dir}): ${rmResult.stderr}`))
+        }
       }
     }
   } catch (error) {
@@ -712,8 +750,18 @@ async function performRollback(
           spinner.start('正在还原额外文件...')
           continue
         }
-        await ssh.execCommand(`mkdir -p ${join(config.server.deployPath, file, '..')}`)
-        await ssh.execCommand(`cp -f ${remoteVersionFilePath} ${remoteRootFilePath}`)
+        const mkdirResult = await ssh.execCommand(
+          `mkdir -p ${join(config.server.deployPath, file, '..')}`,
+        )
+        if (mkdirResult.code !== 0) {
+          throw new Error(`创建目录失败: ${mkdirResult.stderr}`)
+        }
+        const cpResult = await ssh.execCommand(
+          `cp -f ${remoteVersionFilePath} ${remoteRootFilePath}`,
+        )
+        if (cpResult.code !== 0) {
+          throw new Error(`还原额外文件失败 (${file}): ${cpResult.stderr}`)
+        }
       }
       spinner.succeed('额外文件还原完成')
     }
@@ -910,7 +958,12 @@ async function cleanTempLinks(
 ): Promise<void> {
   try {
     // 查找并删除所有临时链接文件
-    await ssh.execCommand(`find ${deployPath} -name "${buildDirName}.tmp.*" -type l -delete`)
+    const result = await ssh.execCommand(
+      `find ${deployPath} -name "${buildDirName}.tmp.*" -type l -delete`,
+    )
+    if (result.code !== 0) {
+      console.warn(chalk.yellow(`⚠️ 清理临时链接时出现警告: ${result.stderr}`))
+    }
   } catch (error) {
     // 清理失败不影响主流程
     console.warn(chalk.yellow(`⚠️ 清理临时链接时出现警告: ${error}`))
