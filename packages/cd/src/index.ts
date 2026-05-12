@@ -277,10 +277,13 @@ async function deploy(config: DeployConfig, version: string): Promise<void> {
     }
 
     // 11. 执行部署后命令（在 deployPath 根部执行，与 package.json 等文件同级）
+    // 使用 bash --login 加载完整的登录环境（含 nvm/fnm 注入的 PATH），确保 node/npm 等命令可用
     if (config.afterDeploy) {
       for (const cmd of config.afterDeploy) {
         spinner.start(`执行部署后命令: ${cmd}`)
-        const result = await ssh.execCommand(cmd, { cwd: config.server.deployPath })
+        const result = await ssh.execCommand(`bash --login -c ${JSON.stringify(cmd)}`, {
+          cwd: config.server.deployPath,
+        })
         if (result.stdout) {
           spinner.stop()
           console.log(result.stdout)
