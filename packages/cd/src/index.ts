@@ -17,6 +17,12 @@ export interface DeployConfig {
   buildCommand?: string
   /** 构建输出目录 - 必需，指定构建后的文件目录，如 'dist' 或 '.output' */
   buildDir: string
+  /**
+   * 额外部署文件列表
+   *  - 可选，独立于构建目录单独上传到服务器版本目录的文件
+   * 通常是项目根目录下的文件，如 ['package.json', '.env']
+   */
+  files?: string[]
   /** 服务器连接配置 - 必需，包含所有服务器连接信息 */
   server: {
     /** 服务器地址 - 必需，IP地址或域名，如 '192.168.1.100' */
@@ -163,9 +169,20 @@ async function deploy(config: DeployConfig, version: string): Promise<void> {
       throw new Error(`构建目录不存在: ${buildPath}`)
     }
 
-    // 5. 压缩文件
+    // 5. 压缩文件（额外文件一并打入压缩包根部）
     spinner.start('正在压缩文件...')
-    await createZip(buildPath, zipPath, config.excludeFiles)
+    const extraFilesForZip: { localPath: string; name: string }[] = []
+    if (config.files && config.files.length > 0) {
+      for (const file of config.files) {
+        const localFilePath = resolve(process.cwd(), file)
+        if (existsSync(localFilePath)) {
+          extraFilesForZip.push({ localPath: localFilePath, name: file })
+        } else {
+          console.warn(chalk.yellow(`⚠️ 额外文件不存在，已跳过: ${file}`))
+        }
+      }
+    }
+    await createZip(buildPath, zipPath, config.excludeFiles, extraFilesForZip)
     spinner.succeed('文件压缩完成')
 
     // 6. 上传到服务器
@@ -217,7 +234,25 @@ async function deploy(config: DeployConfig, version: string): Promise<void> {
     `)
     spinner.succeed('文件解压完成')
 
-    // 10. 执行部署后命令（在新版本目录中）
+    // 10. 将解压后版本目录内的额外文件复制到 deployPath 根部（与软链接同级）
+    if (config.files && config.files.length > 0) {
+      spinner.start('正在部署额外文件...')
+      for (const file of config.files) {
+        const remoteVersionFilePath = join(versionPath, file)
+        const remoteRootFilePath = join(config.server.deployPath, file)
+        const checkFile = await ssh.execCommand(`test -f ${remoteVersionFilePath}`)
+        if (checkFile.code !== 0) {
+          spinner.warn(`额外文件不在版本目录中，已跳过: ${file}`)
+          spinner.start('正在部署额外文件...')
+          continue
+        }
+        await ssh.execCommand(`mkdir -p ${join(config.server.deployPath, file, '..')}`)
+        await ssh.execCommand(`cp -f ${remoteVersionFilePath} ${remoteRootFilePath}`)
+      }
+      spinner.succeed(`额外文件部署完成 (${config.files.length} 个)`)
+    }
+
+    // 11. 执行部署后命令（在新版本目录中）
     if (config.afterDeploy) {
       spinner.start('执行部署后命令...')
       for (const cmd of config.afterDeploy) {
@@ -226,7 +261,7 @@ async function deploy(config: DeployConfig, version: string): Promise<void> {
       spinner.succeed('部署后命令执行完成')
     }
 
-    // 11. 原子性切换软链接
+    // 12. 原子性切换软链接
     spinner.start(`正在切换到新版本 ${version}...`)
     const tempLinkPath = `${currentLinkPath}.tmp.${Date.now()}`
 
@@ -252,7 +287,7 @@ async function deploy(config: DeployConfig, version: string): Promise<void> {
       throw error
     }
 
-    // 12. PM2 重启
+    // 13. PM2 重启
     if (config.pm2) {
       spinner.start('正在重启 PM2 应用...')
       const { appName, restart = true } = config.pm2
@@ -277,14 +312,14 @@ async function deploy(config: DeployConfig, version: string): Promise<void> {
       }
     }
 
-    // 13. 清理旧版本（可选，保留最近3个版本）
+    // 14. 清理旧版本（可选，保留最近3个版本）
     spinner.start('正在清理旧版本...')
     await cleanOldVersions(ssh, config.server.deployPath, buildDirName, 3)
     spinner.succeed('旧版本清理完成')
 
     ssh.dispose()
 
-    // 14. 清理临时文件
+    // 15. 清理临时文件
     await fse.remove(tempDir)
 
     console.log(chalk.green('\n🎉 部署完成!'))
@@ -310,6 +345,7 @@ async function createZip(
   sourcePath: string,
   outputPath: string,
   excludeFiles: string[] = [],
+  extraFiles: { localPath: string; name: string }[] = [],
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const output = fse.createWriteStream(outputPath)
@@ -325,6 +361,11 @@ async function createZip(
       cwd: sourcePath,
       ignore: excludeFiles,
     })
+
+    // 将额外文件添加到压缩包根部（与构建产物同级，不进入构建目录）
+    for (const { localPath, name } of extraFiles) {
+      archive.file(localPath, { name })
+    }
 
     archive.finalize()
   })
@@ -656,6 +697,25 @@ async function performRollback(
       // 确保清理临时链接
       await ssh.execCommand(`rm -f ${tempLinkPath}`)
       throw error
+    }
+
+    // 从目标版本目录还原额外文件到 deployPath 根部
+    if (config.files && config.files.length > 0) {
+      spinner.start('正在还原额外文件...')
+      for (const file of config.files) {
+        const remoteVersionFilePath = join(versionPath, file)
+        const remoteRootFilePath = join(config.server.deployPath, file)
+        // 检查版本目录中是否存在该文件（旧版本可能没有）
+        const checkFile = await ssh.execCommand(`test -f ${remoteVersionFilePath}`)
+        if (checkFile.code !== 0) {
+          spinner.warn(`版本 ${targetVersion} 中不存在文件 ${file}，已跳过`)
+          spinner.start('正在还原额外文件...')
+          continue
+        }
+        await ssh.execCommand(`mkdir -p ${join(config.server.deployPath, file, '..')}`)
+        await ssh.execCommand(`cp -f ${remoteVersionFilePath} ${remoteRootFilePath}`)
+      }
+      spinner.succeed('额外文件还原完成')
     }
 
     // 重启 PM2
