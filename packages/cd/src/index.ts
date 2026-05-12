@@ -51,7 +51,7 @@ export interface DeployConfig {
   excludeFiles?: string[]
   /** 部署前命令 - 可选，部署前在本地执行的命令数组，如 ['npm test'] */
   beforeDeploy?: string[]
-  /** 部署后命令 - 可选，部署后在服务器上执行的命令数组，如 ['npm install'] */
+  /** 部署后命令 - 可选，部署后在服务器 deployPath 根目录执行的命令数组，如 ['npm install --production'] */
   afterDeploy?: string[]
 }
 
@@ -252,11 +252,11 @@ async function deploy(config: DeployConfig, version: string): Promise<void> {
       spinner.succeed(`额外文件部署完成 (${config.files.length} 个)`)
     }
 
-    // 11. 执行部署后命令（在新版本目录中）
+    // 11. 执行部署后命令（在 deployPath 根部执行，与 package.json 等文件同级）
     if (config.afterDeploy) {
       spinner.start('执行部署后命令...')
       for (const cmd of config.afterDeploy) {
-        await ssh.execCommand(cmd, { cwd: versionPath })
+        await ssh.execCommand(cmd, { cwd: config.server.deployPath })
       }
       spinner.succeed('部署后命令执行完成')
     }
