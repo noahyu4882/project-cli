@@ -277,21 +277,10 @@ async function deploy(config: DeployConfig, version: string): Promise<void> {
     }
 
     // 11. 执行部署后命令（在 deployPath 根部执行，与 package.json 等文件同级）
-    // 注意：不能用 bash -i，在无 PTY 的 SSH exec 中会挂起等待 TTY
-    // 通过设置 PS1 绕过 .bashrc 开头的 [ -z "$PS1" ] && return 守卫，使 nvm/fnm 的 PATH 正常注入
     if (config.afterDeploy) {
       for (const cmd of config.afterDeploy) {
         spinner.start(`执行部署后命令: ${cmd}`)
-        const inner = [
-          'export PS1="x"',
-          '[ -f /etc/profile ] && . /etc/profile 2>/dev/null || true',
-          '[ -f ~/.bash_profile ] && . ~/.bash_profile 2>/dev/null || true',
-          '[ -f ~/.bashrc ] && . ~/.bashrc 2>/dev/null || true',
-          cmd,
-        ].join('; ')
-        const result = await ssh.execCommand(`bash -l -c ${JSON.stringify(inner)}`, {
-          cwd: config.server.deployPath,
-        })
+        const result = await execNodeCommand(ssh, cmd, { cwd: config.server.deployPath })
         if (result.stdout) {
           spinner.stop()
           console.log(result.stdout)
@@ -341,12 +330,12 @@ async function deploy(config: DeployConfig, version: string): Promise<void> {
         // 等待一小段时间确保文件系统操作完成
         await new Promise((resolve) => setTimeout(resolve, 1000))
 
-        const result = await ssh.execCommand(`pm2 restart ${appName}`)
+        const result = await execNodeCommand(ssh, `pm2 restart ${appName}`)
         if (result.code === 0) {
           spinner.succeed('PM2 应用重启成功')
         } else {
           // 如果重启失败，尝试启动
-          const startResult = await ssh.execCommand(`pm2 start ${appName}`)
+          const startResult = await execNodeCommand(ssh, `pm2 start ${appName}`)
           if (startResult.code === 0) {
             spinner.succeed('PM2 应用启动成功')
           } else {
@@ -785,7 +774,7 @@ async function performRollback(
       // 等待一小段时间确保文件系统操作完成
       await new Promise((resolve) => setTimeout(resolve, 1000))
 
-      const result = await ssh.execCommand(`pm2 restart ${appName}`)
+      const result = await execNodeCommand(ssh, `pm2 restart ${appName}`)
       if (result.code === 0) {
         spinner.succeed('PM2 应用重启成功')
       } else {
@@ -954,6 +943,26 @@ async function createSSHConnection(server: DeployConfig['server']): Promise<Node
   } catch (error: unknown) {
     throw new Error(`SSH 连接失败: ${error instanceof Error ? error.message : String(error)}`)
   }
+}
+
+/**
+ * 在 SSH 中执行需要 Node.js 环境的命令
+ * 通过 bash -l 登录 shell 并 source 各类 profile 文件，确保 nvm/fnm/系统 Node.js 的 PATH 正常注入
+ * 同时设置 PS1 以绕过 .bashrc 开头的 [ -z "$PS1" ] && return 守卫
+ */
+async function execNodeCommand(
+  ssh: NodeSSH,
+  cmd: string,
+  options?: { cwd?: string },
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  const inner = [
+    'export PS1="x"',
+    '[ -f /etc/profile ] && . /etc/profile 2>/dev/null || true',
+    '[ -f ~/.bash_profile ] && . ~/.bash_profile 2>/dev/null || true',
+    '[ -f ~/.bashrc ] && . ~/.bashrc 2>/dev/null || true',
+    cmd,
+  ].join('; ')
+  return ssh.execCommand(`bash -l -c ${JSON.stringify(inner)}`, options)
 }
 
 /**
