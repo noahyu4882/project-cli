@@ -322,26 +322,30 @@ async function deploy(config: DeployConfig, version: string): Promise<void> {
       throw error
     }
 
-    // 13. PM2 重启
+    // 13. PM2 启动
     if (config.pm2) {
-      spinner.start('正在重启 PM2 应用...')
+      spinner.start('正在启动 PM2 应用...')
       const { appName, restart = true } = config.pm2
       if (restart) {
         // 等待一小段时间确保文件系统操作完成
         await new Promise((resolve) => setTimeout(resolve, 1000))
 
-        const result = await execNodeCommand(ssh, `pm2 restart ${appName}`)
+        const result = await execNodeCommand(ssh, `pm2 start ${appName}`, {
+          cwd: config.server.deployPath,
+        })
         if (result.code === 0) {
-          spinner.succeed('PM2 应用重启成功')
+          spinner.succeed('PM2 应用启动成功')
         } else {
-          // 如果重启失败，尝试启动
-          const startResult = await execNodeCommand(ssh, `pm2 start ${appName}`)
+          // 如果启动失败，尝试配置文件
+          const startResult = await execNodeCommand(ssh, 'pm2 start ecosystem.config.js', {
+            cwd: config.server.deployPath,
+          })
           if (startResult.code === 0) {
             spinner.succeed('PM2 应用启动成功')
           } else {
             spinner.warn('PM2 操作失败，请手动检查')
-            console.log(chalk.yellow(`重启命令: pm2 restart ${appName}`))
             console.log(chalk.yellow(`启动命令: pm2 start ${appName}`))
+            console.log(chalk.yellow('启动命令: pm2 start ecosystem.config.js'))
           }
         }
       }
@@ -774,12 +778,14 @@ async function performRollback(
       // 等待一小段时间确保文件系统操作完成
       await new Promise((resolve) => setTimeout(resolve, 1000))
 
-      const result = await execNodeCommand(ssh, `pm2 restart ${appName}`)
+      const result = await execNodeCommand(ssh, `pm2 start ${appName}`, {
+        cwd: config.server.deployPath,
+      })
       if (result.code === 0) {
-        spinner.succeed('PM2 应用重启成功')
+        spinner.succeed('PM2 应用启动成功')
       } else {
-        spinner.warn('PM2 重启失败，请手动检查')
-        console.log(chalk.yellow(`手动重启命令: pm2 restart ${appName}`))
+        spinner.warn('PM2 启动失败，请手动检查')
+        console.log(chalk.yellow(`启动命令: pm2 start ${appName}`))
       }
     }
 
