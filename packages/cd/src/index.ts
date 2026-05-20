@@ -395,10 +395,11 @@ async function createZip(
 
     archive.pipe(output)
 
-    // 添加整个目录，排除指定文件
+    // 添加整个目录，排除指定文件；follow: true 跟踪软链接写入实际内容，避免服务器解压后链接失效
     archive.glob('**/*', {
       cwd: sourcePath,
       ignore: excludeFiles,
+      follow: true,
     })
 
     // 将额外文件添加到压缩包根部（与构建产物同级，不进入构建目录）
