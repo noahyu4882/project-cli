@@ -254,23 +254,41 @@ async function deploy(config: DeployConfig, version: string): Promise<void> {
       for (const file of config.files) {
         const remoteVersionFilePath = join(versionPath, file)
         const remoteRootFilePath = join(config.server.deployPath, file)
-        const checkFile = await ssh.execCommand(`test -f ${remoteVersionFilePath}`)
-        if (checkFile.code !== 0) {
+        // 使用 test -e 同时支持文件和目录的存在检查
+        const checkExists = await ssh.execCommand(`test -e ${remoteVersionFilePath}`)
+        if (checkExists.code !== 0) {
           spinner.warn(`额外文件不在版本目录中，已跳过: ${file}`)
           spinner.start('正在部署额外文件...')
           continue
         }
-        const mkdirResult = await ssh.execCommand(
-          `mkdir -p ${join(config.server.deployPath, file, '..')}`,
-        )
-        if (mkdirResult.code !== 0) {
-          throw new Error(`创建目录失败: ${mkdirResult.stderr}`)
-        }
-        const cpResult = await ssh.execCommand(
-          `cp -f ${remoteVersionFilePath} ${remoteRootFilePath}`,
-        )
-        if (cpResult.code !== 0) {
-          throw new Error(`复制额外文件失败 (${file}): ${cpResult.stderr}`)
+        // 判断是目录还是文件，分别处理
+        const checkDir = await ssh.execCommand(`test -d ${remoteVersionFilePath}`)
+        if (checkDir.code === 0) {
+          // 是目录：确保目标目录存在，用 /. 语法将内容（含深层子目录）合并复制，避免路径嵌套
+          const mkdirResult = await ssh.execCommand(`mkdir -p ${remoteRootFilePath}`)
+          if (mkdirResult.code !== 0) {
+            throw new Error(`创建目录失败: ${mkdirResult.stderr}`)
+          }
+          const cpResult = await ssh.execCommand(
+            `cp -rf ${remoteVersionFilePath}/. ${remoteRootFilePath}/`,
+          )
+          if (cpResult.code !== 0) {
+            throw new Error(`复制额外目录失败 (${file}): ${cpResult.stderr}`)
+          }
+        } else {
+          // 是文件：确保父目录存在，然后复制文件
+          const mkdirResult = await ssh.execCommand(
+            `mkdir -p ${join(config.server.deployPath, file, '..')}`,
+          )
+          if (mkdirResult.code !== 0) {
+            throw new Error(`创建目录失败: ${mkdirResult.stderr}`)
+          }
+          const cpResult = await ssh.execCommand(
+            `cp -f ${remoteVersionFilePath} ${remoteRootFilePath}`,
+          )
+          if (cpResult.code !== 0) {
+            throw new Error(`复制额外文件失败 (${file}): ${cpResult.stderr}`)
+          }
         }
       }
       spinner.succeed(`额外文件部署完成 (${config.files.length} 个)`)
@@ -404,7 +422,12 @@ async function createZip(
 
     // 将额外文件添加到压缩包根部（与构建产物同级，不进入构建目录）
     for (const { localPath, name } of extraFiles) {
-      archive.file(localPath, { name })
+      if (fse.statSync(localPath).isDirectory()) {
+        // 目录：将目录内容（含子目录）打包到压缩包的 name/ 下
+        archive.directory(localPath, name)
+      } else {
+        archive.file(localPath, { name })
+      }
     }
 
     archive.finalize()
