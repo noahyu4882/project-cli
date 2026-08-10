@@ -46,6 +46,8 @@ export interface DeployConfig {
     appName: string
     /** 是否重启 - 可选，默认true，部署后是否自动重启PM2应用 */
     restart?: boolean
+    /** PM2环境 - 可选，指定PM2启动时的环境，如 'production'、'staging' 等，对应 --env 参数 */
+    env?: string
   }
   /** 排除文件列表 - 可选，打包时要排除的文件/目录模式，如 ['node_modules/**'] */
   excludeFiles?: string[]
@@ -348,22 +350,27 @@ async function deploy(config: DeployConfig, version: string): Promise<void> {
         // 等待一小段时间确保文件系统操作完成
         await new Promise((resolve) => setTimeout(resolve, 1000))
 
-        const result = await execNodeCommand(ssh, `pm2 start ${appName}`, {
+        const pm2EnvFlag = config.pm2?.env ? ` --env ${config.pm2.env}` : ''
+        const result = await execNodeCommand(ssh, `pm2 start ${appName}${pm2EnvFlag}`, {
           cwd: config.server.deployPath,
         })
         if (result.code === 0) {
           spinner.succeed('PM2 应用启动成功')
         } else {
           // 如果启动失败，尝试配置文件
-          const startResult = await execNodeCommand(ssh, 'pm2 start ecosystem.config.js', {
-            cwd: config.server.deployPath,
-          })
+          const startResult = await execNodeCommand(
+            ssh,
+            `pm2 start ecosystem.config.js${pm2EnvFlag}`,
+            {
+              cwd: config.server.deployPath,
+            },
+          )
           if (startResult.code === 0) {
             spinner.succeed('PM2 应用启动成功')
           } else {
             spinner.warn('PM2 操作失败，请手动检查')
-            console.log(chalk.yellow(`启动命令: pm2 start ${appName}`))
-            console.log(chalk.yellow('启动命令: pm2 start ecosystem.config.js'))
+            console.log(chalk.yellow(`启动命令: pm2 start ${appName}${pm2EnvFlag}`))
+            console.log(chalk.yellow(`启动命令: pm2 start ecosystem.config.js${pm2EnvFlag}`))
           }
         }
       }
@@ -802,14 +809,15 @@ async function performRollback(
       // 等待一小段时间确保文件系统操作完成
       await new Promise((resolve) => setTimeout(resolve, 1000))
 
-      const result = await execNodeCommand(ssh, `pm2 start ${appName}`, {
+      const pm2EnvFlag = config.pm2?.env ? ` --env ${config.pm2.env}` : ''
+      const result = await execNodeCommand(ssh, `pm2 start ${appName}${pm2EnvFlag}`, {
         cwd: config.server.deployPath,
       })
       if (result.code === 0) {
         spinner.succeed('PM2 应用启动成功')
       } else {
         spinner.warn('PM2 启动失败，请手动检查')
-        console.log(chalk.yellow(`启动命令: pm2 start ${appName}`))
+        console.log(chalk.yellow(`启动命令: pm2 start ${appName}${pm2EnvFlag}`))
       }
     }
 
